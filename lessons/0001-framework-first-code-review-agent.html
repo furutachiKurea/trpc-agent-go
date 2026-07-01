@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第一课：读懂 issue 中的框架术语</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Lesson 0001 · 预计 12 分钟</p>
+    <h1>读懂 issue 中的框架术语</h1>
+    <p class="lede">这一课只做一件事：解释 issue #2004 中反复出现的框架词。学完后，你应能说清楚这些词分别指向什么背景知识，而不是照着课程实现方案。</p>
+  </header>
+
+  <section>
+    <h2>术语层次</h2>
+    <p>issue #2004 涉及的框架背景可以分成下面几层：</p>
+    <div class="flow" aria-label="framework term layers">
+      <span>Runner</span>
+      <span>LLMAgent</span>
+      <span>Skill</span>
+      <span>PermissionPolicy</span>
+      <span>CodeExecutor</span>
+      <span>Storage</span>
+      <span>Telemetry</span>
+    </div>
+    <p><code>Runner</code> 是一次 run 的外层执行器，关联 session 和事件流；<code>LLMAgent</code> 是可挂载模型、工具、Skill 和 executor 的 Agent 类型；<code>Skill</code> 用 <code>SKILL.md</code>、docs、scripts 表达可复用工作流；<code>PermissionPolicy</code> 表示工具执行前的治理决策；<code>CodeExecutor</code> 提供隔离 workspace 和程序执行抽象；Storage 与 Telemetry 分别对应可查询记录和运行观测。</p>
+  </section>
+
+  <section>
+    <h2>三条容易混淆的边界</h2>
+    <div class="grid">
+      <div class="panel">
+        <h3><code>skill_load</code> 不是执行脚本</h3>
+        <p>Skill 文档说明，<code>skill_load</code> 加载 <code>SKILL.md</code> 正文和选定 docs；脚本执行发生在 workspace 中，通常通过 <code>workspace_exec</code>。</p>
+      </div>
+      <div class="panel">
+        <h3><code>WithCodeExecutor</code> 不是自动跑所有代码块</h3>
+        <p>配置 executor 让 execution tools 可用；Markdown fenced-code auto-execution 是另一个独立开关。理解这点能避免把“有 executor”和“自动执行回复里的代码块”混为一谈。</p>
+      </div>
+      <div class="panel">
+        <h3>local executor 不是默认生产方案</h3>
+        <p>Skill 文档明确 local fallback 是开发便利。issue 要求 container 或 E2B workspace runtime；本地 runtime 只能作为 fallback。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>背景知识分层</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>层</th>
+        <th>你需要理解的问题</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>框架层</td>
+        <td>Runner、LLMAgent、Tool、Skill、Workspace、Session 在框架中各自是什么。</td>
+      </tr>
+      <tr>
+        <td>代码评审层</td>
+        <td>finding、severity、confidence、evidence、recommendation、rule_id 为什么要结构化。</td>
+      </tr>
+      <tr>
+        <td>Go 工程层</td>
+        <td>unified diff、Go package、hunk 行号、<code>go test</code>、<code>go vet</code>、Staticcheck 的语义。</td>
+      </tr>
+      <tr>
+        <td>安全治理层</td>
+        <td>沙箱、权限决策、环境变量白名单、输出限制、脱敏、artifact 限制分别防什么风险。</td>
+      </tr>
+      <tr>
+        <td>审计存储层</td>
+        <td>task、sandbox run、permission decision、finding、artifact、report、metrics 为什么需要可查询。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>来源</h2>
+    <ul>
+      <li><a href="https://github.com/trpc-group/trpc-agent-go/issues/2004">Issue #2004</a>：需求、交付物和验收标准。</li>
+      <li><a href="../docs/mkdocs/en/skill.md">Skill 文档</a>：Skill 加载、workspace 执行、local fallback 和 executor 配置。</li>
+      <li><a href="../docs/mkdocs/zh/runner.md">Runner 文档</a>：Runner 会话、事件流和 Agent 调用职责。</li>
+      <li><a href="../codeexecutor/workspace.go">workspace.go</a>：workspace、RunProgramSpec、RunResult、Engine 能力。</li>
+      <li><a href="../tool/permission.go">permission.go</a>：allow、deny、ask 和 PermissionPolicy。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>练习</h2>
+    <p>先自己回答，再展开答案。目标是检验你是否读懂术语边界。</p>
+
+    <details>
+      <summary>1. 高风险命令应该由哪个组件先拦截？</summary>
+      <p><code>PermissionPolicy</code> 或安全 wrapper。<code>deny</code> / <code>ask</code> 不能继续进入沙箱执行；否则就变成“执行后记录”，不满足治理边界。</p>
+    </details>
+
+    <details>
+      <summary>2. 自动 CR Agent 和 diff scanner 的概念差异是什么？</summary>
+      <p>diff scanner 主要关注从变更文本中发现问题；issue 中的自动 CR Agent 还涉及 Skill、沙箱执行、Permission 决策、数据库记录、监控审计、artifact 和报告这些系统背景。</p>
+    </details>
+
+    <details>
+      <summary>3. deterministic rule-only 是什么背景词？</summary>
+      <p>它表示系统中一部分审查能力不依赖真实模型 API key，结果应可重复。理解这个词，是为了读懂验收标准对可测试性的要求。</p>
+    </details>
+
+    <details>
+      <summary>4. 为什么脱敏不仅是报告格式问题？</summary>
+      <p>因为 issue 同时要求报告和数据库不出现明文敏感信息。脱敏背景涉及持久化记录、artifact、中间审计数据和最终输出。</p>
+    </details>
+  </section>
+
+  <section>
+    <h2>下一课</h2>
+    <p>下一节适合学习 unified diff 的背景：文件头、hunk header、新旧行号和 Go package 信息。配套速查见 <a href="../reference/0001-issue-2004-knowledge-map.html">Issue 2004 知识地图</a>。</p>
+    <p class="meta">如果某个概念不清楚，直接问 agent；背景知识和实现方案分开讨论。</p>
+  </section>
+</main>
+</body>
+</html>

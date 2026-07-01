@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Issue 2004 知识地图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Reference 0001</p>
+    <h1>Issue 2004 知识地图</h1>
+    <p class="lede">读懂 issue #2004 可能涉及的背景知识集合。每一项都对应 issue 中出现的概念或验收词，优先读本仓库当前文档和一手官方资料。</p>
+  </header>
+
+  <section>
+    <h2>概念关系</h2>
+    <div class="flow" aria-label="code review agent concept relationship">
+      <span>diff / repo 输入</span>
+      <span>hunk / package 背景</span>
+      <span>Skill 背景</span>
+      <span>Permission / Filter 背景</span>
+      <span>沙箱执行背景</span>
+      <span>finding 结构背景</span>
+      <span>去重 / 降噪背景</span>
+      <span>脱敏背景</span>
+      <span>SQLite / 审计背景</span>
+      <span>报告语义</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>框架概念速查</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>概念</th>
+        <th>本 issue 中需要理解的含义</th>
+        <th>阅读入口</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>Runner</code></td>
+        <td>一次 Agent run 的外层执行器，关联 session、invocation 和事件流。</td>
+        <td><a href="../docs/mkdocs/zh/runner.md">Runner 文档</a></td>
+      </tr>
+      <tr>
+        <td><code>LLMAgent</code></td>
+        <td>框架中的 LLM Agent 类型，可挂载模型、工具、Skill 和 code executor。</td>
+        <td><a href="../README.md">README</a></td>
+      </tr>
+      <tr>
+        <td><code>Skill</code></td>
+        <td>以 <code>SKILL.md</code>、docs、scripts 表达可复用工作流的机制。</td>
+        <td><a href="../docs/mkdocs/en/skill.md">Skill 文档</a></td>
+      </tr>
+      <tr>
+        <td><code>workspace_exec</code></td>
+        <td>workspace 内命令执行工具，和 <code>skill_load</code> 不是同一个概念。</td>
+        <td><a href="../tool/workspaceexec/workspace_exec.go">workspace_exec.go</a></td>
+      </tr>
+      <tr>
+        <td><code>CodeExecutor</code></td>
+        <td>抽象 workspace lifecycle、文件 staging、程序执行、输出收集的接口层。</td>
+        <td><a href="../codeexecutor/workspace.go">workspace.go</a></td>
+      </tr>
+      <tr>
+        <td><code>PermissionPolicy</code></td>
+        <td>工具执行前的治理决策，结果包括 <code>allow</code>、<code>deny</code> 或 <code>ask</code>。</td>
+        <td><a href="../tool/permission.go">permission.go</a></td>
+      </tr>
+      <tr>
+        <td>SQLite / Storage</td>
+        <td>issue 中审计、回放、查询所需的持久化背景。</td>
+        <td><a href="../docs/mkdocs/zh/session/sqlite.md">SQLite 文档</a></td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>必须掌握的外部知识</h2>
+    <div class="grid">
+      <div class="panel">
+        <h3>Unified diff</h3>
+        <p>识别 <code>diff --git</code>、<code>---/+++</code>、<code>@@ -old,+new @@</code>，把新增行映射到新文件行号。</p>
+        <p><a href="https://git-scm.com/docs/diff-format">Git diff-format</a></p>
+      </div>
+      <div class="panel">
+        <h3>Go test / vet</h3>
+        <p><code>go test</code> 会运行一个高置信 vet 子集；完整 vet 需要显式 <code>go vet</code>。</p>
+        <p><a href="https://pkg.go.dev/cmd/go#hdr-Test_packages">go test</a> · <a href="https://pkg.go.dev/cmd/vet">go vet</a></p>
+      </div>
+      <div class="panel">
+        <h3>Context lifecycle</h3>
+        <p><code>CancelFunc</code> 不调用会泄漏 child context 和 timer；这是 goroutine/context 类规则的重要依据。</p>
+        <p><a href="https://pkg.go.dev/context">context package</a></p>
+      </div>
+      <div class="panel">
+        <h3>database/sql lifecycle</h3>
+        <p><code>Conn.Close</code> 归还连接；<code>BeginTx</code> 绑定 context，取消会影响事务。</p>
+        <p><a href="https://pkg.go.dev/database/sql">database/sql package</a></p>
+      </div>
+      <div class="panel">
+        <h3>Staticcheck</h3>
+        <p>作为可选增强检查，rule_id 可参考 Staticcheck 的 SA/ST/S 规则命名。</p>
+        <p><a href="https://staticcheck.dev/docs/checks">Staticcheck checks</a></p>
+      </div>
+      <div class="panel">
+        <h3>E2B</h3>
+        <p>远程 Linux sandbox 方案，需要服务和 key；issue 同时点名 container 和 E2B。</p>
+        <p><a href="https://e2b.dev/docs">E2B docs</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>概念边界</h2>
+    <div class="callout danger">
+      <p><strong>自动 CR Agent 不是普通 scanner。</strong> issue 明确讨论 Skill、沙箱、Permission/Filter、Telemetry、SQLite/持久化。一个 scanner 只覆盖 finding 产生的一部分背景。</p>
+    </div>
+    <div class="callout">
+      <p><strong>finding 和 warning 不是同一层。</strong> severity、confidence、source、rule_id、dedup、needs_human_review 是结构化审查结果的背景词。</p>
+    </div>
+    <div class="callout ok">
+      <p><strong>deterministic rule-only 是验收背景。</strong> 它说明该系统的部分行为应能在无真实模型 API key 时被验证；课程只解释这个概念，不给出实现步骤。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>推荐第一轮阅读</h2>
+    <ol>
+      <li><a href="https://github.com/trpc-group/trpc-agent-go/issues/2004">Issue #2004</a></li>
+      <li><a href="../docs/mkdocs/zh/runner.md">Runner 文档</a></li>
+      <li><a href="../docs/mkdocs/en/skill.md">Skill 文档</a></li>
+      <li><a href="../codeexecutor/workspace.go">CodeExecutor workspace 接口</a></li>
+      <li><a href="../tool/permission.go">Permission 接口</a></li>
+    </ol>
+  </section>
+</main>
+</body>
+</html>
