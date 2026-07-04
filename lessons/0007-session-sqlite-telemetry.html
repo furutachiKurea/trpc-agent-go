@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第七课：Session、SQLite 与 Telemetry</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Lesson 0007 · 预计 16 分钟</p>
+    <h1>Session、SQLite 与 Telemetry</h1>
+    <p class="lede">这一课解决“Agent 跑完后留下什么”。你需要区分框架的会话持久化、应用自己的审计数据，以及 OpenTelemetry 这类运行观测。</p>
+  </header>
+
+  <section>
+    <h2>Session 不是一个泛用业务数据库</h2>
+    <p>框架文档把 Session 定位为对话上下文管理。隔离维度是 <code>&lt;appName, userID, sessionID&gt;</code>，保存用户消息、Agent 回复、工具调用结果、状态和摘要，用来支撑多轮 Agent 运行。</p>
+    <table>
+      <thead>
+      <tr>
+        <th>数据</th>
+        <th>适不适合放 Session</th>
+        <th>原因</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>对话事件、工具结果、状态键值</td>
+        <td>适合</td>
+        <td>这是 Session Service 的核心职责，Runner 会自动加载和追加。</td>
+      </tr>
+      <tr>
+        <td>一次任务的审计记录、权限决策明细、报告索引</td>
+        <td>看需求</td>
+        <td>可以和 session 关联，但通常需要应用自己的查询模型和表结构。</td>
+      </tr>
+      <tr>
+        <td>大 artifact、完整日志、原始仓库快照</td>
+        <td>通常不适合</td>
+        <td>应考虑 artifact 存储、文件系统或对象存储，并只在 DB 里保存引用和摘要。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Runner 如何接入 Session</h2>
+    <pre><code class="language-go">sessionService := inmemory.NewSessionService()
+
+r := runner.NewRunner(
+    "my-app",
+    agentInstance,
+    runner.WithSessionService(sessionService),
+)</code></pre>
+    <p>如果不配置 <code>runner.WithSessionService</code>，Runner 默认使用内存存储，进程重启后数据丢失。需要持久化时，要显式换成 SQLite、Redis、PostgreSQL、MySQL 等后端。</p>
+  </section>
+
+  <section>
+    <h2>SQLite Session 的入口</h2>
+    <pre><code class="language-go">db, err := sql.Open(
+    "sqlite3",
+    "file:sessions.db?_busy_timeout=5000&amp;_journal_mode=WAL",
+)
+if err != nil {
+    return err
+}
+
+sessionService, err := sessionsqlite.NewService(
+    db,
+    sessionsqlite.WithSessionEventLimit(1000),
+    sessionsqlite.WithSoftDelete(true),
+)
+if err != nil {
+    return err
+}
+defer sessionService.Close()
+
+r := runner.NewRunner(
+    "my-app",
+    agentInstance,
+    runner.WithSessionService(sessionService),
+)</code></pre>
+    <div class="callout">
+      <p>SQLite 后端依赖 <code>github.com/mattn/go-sqlite3</code>，需要 CGO 和 C 编译器。文档建议并发场景考虑 WAL 和 <code>_busy_timeout</code>。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>State、Event、Report 的区别</h2>
+    <div class="grid">
+      <div class="panel">
+        <h3>State</h3>
+        <p>键值状态，能被 instruction placeholder、下游 Agent 或工具读取。适合小型、当前会话相关的数据。</p>
+      </div>
+      <div class="panel">
+        <h3>Event</h3>
+        <p>运行时事实流，包括用户消息、assistant 响应、工具调用、工具结果、错误和结构化输出。</p>
+      </div>
+      <div class="panel">
+        <h3>Report</h3>
+        <p>面向外部消费的结果文档或 JSON。它可以来自事件和业务表，但不等于 session 本身。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Telemetry 看的是运行行为</h2>
+    <p>Observability 文档说明，框架基于 OpenTelemetry 支持 traces、metrics 和 logging。Agent 执行可产生类似 <code>agent.execution</code>、<code>tool.invocation</code>、<code>model.api_call</code> 的链路信息，用来定位耗时、错误和依赖关系。</p>
+    <pre><code class="language-go">clean, err := atrace.Start(
+    ctx,
+    atrace.WithEndpoint("localhost:4317"),
+)
+if err != nil {
+    return err
+}
+defer clean()
+
+mp, err := ametric.NewMeterProvider(
+    ctx,
+    ametric.WithEndpoint("localhost:4318"),
+    ametric.WithProtocol("http"),
+)
+if err != nil {
+    return err
+}
+defer mp.Shutdown(ctx)
+ametric.InitMeterProvider(mp)</code></pre>
+    <p>Telemetry 不替代数据库。数据库回答“这次任务留下了什么结果”；Telemetry 回答“运行时发生了什么、哪里慢、哪里失败、调用了什么”。</p>
+  </section>
+
+  <section>
+    <h2>大 payload 要有策略</h2>
+    <p>Observability 文档提供 <code>SpanAttributePolicy</code>，可对 messages、tool arguments、tool result 等大 attribute 做 drop、omit 或 truncate。实现会执行工具的 Agent 时，这类策略很重要，因为工具输出可能非常大，甚至包含敏感信息。</p>
+    <pre><code class="language-go">clean, err := atrace.Start(ctx,
+    atrace.WithSpanAttributePolicy(
+        atrace.WithAttributeRule(
+            atrace.OperationChat,
+            atrace.AttrInputMessagesOTel,
+            atrace.Drop(),
+        ),
+    ),
+)</code></pre>
+  </section>
+
+  <section>
+    <h2>练习</h2>
+    <details>
+      <summary>1. Session SQLite 和业务审计 SQLite 是同一个概念吗？</summary>
+      <p>不是。Session SQLite 是框架的会话后端；业务审计数据是否放同一个 DB 文件、同一套表，取决于应用查询模型和数据边界。</p>
+    </details>
+    <details>
+      <summary>2. 为什么 telemetry 不能替代 report JSON？</summary>
+      <p>Telemetry 主要用于运行观测和性能/错误分析；report JSON 是面向消费方的结构化结果。二者问题域不同。</p>
+    </details>
+    <details>
+      <summary>3. 为什么大 tool result 不应该无脑写进 span attribute？</summary>
+      <p>它可能造成高内存、高导出成本、后端查询困难和敏感信息暴露。应按需要 drop、omit、truncate 或只记录摘要。</p>
+    </details>
+  </section>
+
+  <section>
+    <h2>来源</h2>
+    <ul>
+      <li><a href="../docs/mkdocs/zh/session/index.md">Session 文档</a></li>
+      <li><a href="../docs/mkdocs/zh/session/sqlite.md">SQLite Session 文档</a></li>
+      <li><a href="../docs/mkdocs/zh/observability.md">Observability 文档</a></li>
+      <li><a href="../examples/session/util.go">Session example utilities</a></li>
+      <li><a href="../examples/telemetry/jaeger-prometheus/main.go">Telemetry example</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

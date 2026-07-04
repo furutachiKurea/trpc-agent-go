@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tool Governance 速查</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Reference 0002</p>
+    <h1>Tool Governance 速查</h1>
+    <p class="lede">tRPC-Agent-Go 中工具治理的三层边界：可见、自动执行、执行前审批。issue #2004 里的高风险命令治理主要落在第三层。</p>
+  </header>
+
+  <section>
+    <h2>三层边界</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>机制</th>
+        <th>判断时机</th>
+        <th>控制什么</th>
+        <th>典型结果</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>ToolFilter</code></td>
+        <td>构建工具表面时</td>
+        <td>模型能不能看到某个 tool</td>
+        <td>隐藏或展示 tool</td>
+      </tr>
+      <tr>
+        <td><code>ToolExecutionFilter</code></td>
+        <td>模型发出 tool call 后</td>
+        <td>框架是否自动执行这个 tool call</td>
+        <td>自动执行，或停下来交给宿主执行</td>
+      </tr>
+      <tr>
+        <td><code>PermissionPolicy</code></td>
+        <td>tool 即将执行前</td>
+        <td>这次具体调用是否允许执行</td>
+        <td><code>allow</code>、<code>ask</code>、<code>deny</code></td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>PermissionDecision</h2>
+    <div class="grid">
+      <div class="panel">
+        <h3><code>allow</code></h3>
+        <p>允许框架继续执行 tool call。</p>
+      </div>
+      <div class="panel">
+        <h3><code>ask</code></h3>
+        <p>不执行 tool call，返回 approval required。它不是“等待用户批准后继续执行”的机制。</p>
+      </div>
+      <div class="panel">
+        <h3><code>deny</code></h3>
+        <p>不执行 tool call，返回 denied 和原因。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>最小 API 形状</h2>
+    <pre><code class="language-go">func policy(
+    ctx context.Context,
+    req *tool.PermissionRequest,
+) (tool.PermissionDecision, error) {
+    if req.Metadata.Destructive {
+        approved, err := askHostApplication(ctx, req)
+        if err != nil {
+            return tool.PermissionDecision{}, err
+        }
+        if !approved {
+            return tool.DenyPermission("user rejected destructive tool"), nil
+        }
+    }
+    return tool.AllowPermission(), nil
+}
+
+events, err := r.Run(
+    ctx,
+    userID,
+    sessionID,
+    model.NewUserMessage(text),
+    agent.WithToolPermissionPolicyFunc(policy),
+)</code></pre>
+    <p>这是通用 API 用法，不是 issue #2004 的实现方案。真实 policy 可以读 role、tenant、tool name、arguments、metadata 或业务上下文。要让工具执行，policy 必须返回 <code>allow</code>；返回 <code>ask</code> 会跳过本次执行。</p>
+  </section>
+
+  <section>
+    <h2>读取 PermissionRequest</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>字段</th>
+        <th>用途</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>ToolName</code></td>
+        <td>模型可见的 tool 名。适合按工具类型分流。</td>
+      </tr>
+      <tr>
+        <td><code>Arguments</code></td>
+        <td>修复和 before-tool callback 后的 JSON 参数。适合检查命令、路径、环境变量。</td>
+      </tr>
+      <tr>
+        <td><code>Metadata</code></td>
+        <td>工具发布的安全元数据，如 read-only、destructive、search/read。</td>
+      </tr>
+      <tr>
+        <td><code>ToolCallID</code></td>
+        <td>关联模型发出的具体 tool call。适合审计记录。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>来源</h2>
+    <ul>
+      <li><a href="../tool/permission.go">tool/permission.go</a></li>
+      <li><a href="../agent/invocation.go">agent/invocation.go</a></li>
+      <li><a href="../tool/filter.go">tool/filter.go</a></li>
+      <li><a href="../examples/toolpolicy/README.md">examples/toolpolicy/README.md</a></li>
+      <li><a href="../examples/toolpolicy/main.go">examples/toolpolicy/main.go</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第四课：CodeExecutor 与 RunProgram</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Lesson 0004 · 预计 18 分钟</p>
+    <h1>CodeExecutor 与 RunProgram</h1>
+    <p class="lede">这一课学习隔离执行的最小 API：workspace、<code>RunProgramSpec</code>、<code>RunResult</code>、输入输出收集和 runtime capability。它解释“在沙箱里跑检查”这句话背后的框架知识。</p>
+  </header>
+
+  <section>
+    <h2>先记住三个接口</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>接口</th>
+        <th>职责</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>WorkspaceManager</code></td>
+        <td>创建和清理 workspace。</td>
+      </tr>
+      <tr>
+        <td><code>WorkspaceFS</code></td>
+        <td>向 workspace 放文件、stage 输入、collect 输出。</td>
+      </tr>
+      <tr>
+        <td><code>ProgramRunner</code></td>
+        <td>在 workspace 中执行程序。</td>
+      </tr>
+      </tbody>
+    </table>
+    <p><code>Engine</code> 把这三者组合起来。<code>EngineProvider</code> 是 code executor 暴露底层 engine 的方式。</p>
+  </section>
+
+  <section>
+    <h2>RunProgramSpec</h2>
+    <p><code>RunProgramSpec</code> 描述一次程序执行请求：</p>
+    <pre><code class="language-go">spec := codeexecutor.RunProgramSpec{
+    Cmd:     "go",
+    Args:    []string{"test", "./..."},
+    Cwd:     "work/repo",
+    Timeout: 2 * time.Minute,
+    Env: map[string]string{
+        "GOFLAGS": "-mod=readonly",
+    },
+}</code></pre>
+    <p>关键字段包括命令、参数、环境变量、相对 workspace 的 cwd、stdin、timeout 和资源限制。是否支持干净环境，要看 runtime 的 capability。</p>
+  </section>
+
+  <section>
+    <h2>RunResult</h2>
+    <p><code>RunResult</code> 是程序执行结果：</p>
+    <pre><code class="language-go">res, err := runner.RunProgram(ctx, ws, spec)
+if err != nil {
+    // runtime 层失败
+    return err
+}
+if res.TimedOut {
+    // 程序超时
+}
+if res.ExitCode != 0 {
+    // 程序自己返回非零退出码
+}
+_ = res.Stdout
+_ = res.Stderr</code></pre>
+    <div class="callout">
+      <p>非零 <code>ExitCode</code> 通常不是 Go error。要检查 <code>RunResult</code>，不能只看 <code>err</code>。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>输入和输出</h2>
+    <div class="grid">
+      <div class="panel">
+        <h3><code>InputSpec</code></h3>
+        <p>把外部输入映射进 workspace。来源可以是 <code>artifact://</code>、<code>host://</code>、<code>workspace://</code>、<code>skill://</code>。</p>
+      </div>
+      <div class="panel">
+        <h3><code>OutputSpec</code></h3>
+        <p>声明要收集的输出 glob、最大文件数、单文件大小、总大小、是否保存 artifact、是否 inline。</p>
+      </div>
+      <div class="panel">
+        <h3><code>Collect</code></h3>
+        <p>按模式读取 workspace 文件。读取可能被截断，结果中有 <code>Truncated</code> 标志。</p>
+      </div>
+      <div class="panel">
+        <h3><code>SaveArtifact</code></h3>
+        <p>把 workspace 中的文件持久化为 artifact 引用，便于后续 turn 或外部系统引用。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>SupportsCleanEnv 是什么</h2>
+    <p><code>Capabilities.SupportsCleanEnv</code> 不是你日常直接调用的 API。它是 executor 对框架说的一句话：我能不能在执行命令时丢掉宿主环境变量，只使用框架明确传入的环境。</p>
+    <p>你真正会写的是这类配置：</p>
+    <pre><code class="language-go">exec := localexec.New()
+
+agt := llmagent.New(
+    "worker",
+    llmagent.WithModel(modelInstance),
+    llmagent.WithCodeExecutor(exec),
+    llmagent.WithWorkspaceExecAllowedCommands("go", "git", "cat", "sed"),
+    llmagent.WithEnableCodeExecutionResponseProcessor(false),
+)</code></pre>
+    <p>这段代码的用户含义是：允许模型通过 <code>workspace_exec</code> 在 workspace 里跑命令，但只允许跑白名单里的命令。因为你启用了命令白名单，框架会进入 policy mode。policy mode 不只检查命令名，还要求执行进程从干净环境启动。</p>
+    <div class="callout">
+      <p>所以 <code>SupportsCleanEnv</code> 是白名单/黑名单命令策略的安全前提。executor 支持它，命令才会运行；executor 不支持它，<code>workspace_exec</code> 会直接拒绝执行，而不是悄悄降级。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>为什么命令白名单需要干净环境</h2>
+    <p>只限制命令名不够。假设你允许 <code>go test ./...</code>，但子进程继承了宿主环境，环境里可能有危险变量：</p>
+    <pre><code class="language-text">BASH_ENV=/tmp/hook.sh
+LD_PRELOAD=/tmp/inject.so
+PATH=/tmp/fake-bin:$PATH</code></pre>
+    <p>这种情况下，你以为模型只是在 workspace 里运行 <code>go</code>，实际启动链路可能先加载了宿主环境里的脚本、动态库或伪造命令。<code>CleanEnv</code> 的作用就是让被执行程序从干净环境启动，只带框架允许的环境变量和 workspace 基础变量。</p>
+    <p>从用户角度记这个规则就够了：</p>
+    <pre><code class="language-text">没有配置 workspace_exec 命令白名单/黑名单：
+  SupportsCleanEnv 通常不是你需要关心的第一件事。
+
+配置了 WithWorkspaceExecAllowedCommands / WithWorkspaceExecDeniedCommands：
+  你选择的 CodeExecutor 必须支持 CleanEnv，否则 workspace_exec 会失败。</code></pre>
+  </section>
+
+  <section>
+    <h2>它和 Workspace 的关系</h2>
+    <p><code>Workspace</code> 解决“在哪里执行”：本机临时目录、容器目录或远程沙箱目录。<code>CleanEnv</code> 解决“执行时带什么环境变量”。这两个问题是并列的，不是同一个概念。</p>
+    <table>
+      <thead>
+      <tr>
+        <th>概念</th>
+        <th>含义</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>Workspace</code></td>
+        <td>命令在哪个隔离工作区里跑，文件从哪里读、往哪里写。</td>
+      </tr>
+      <tr>
+        <td><code>RunProgramSpec.CleanEnv</code></td>
+        <td>这次命令是否应该从干净环境启动。</td>
+      </tr>
+      <tr>
+        <td><code>Capabilities.SupportsCleanEnv</code></td>
+        <td>当前 executor 是否真的能兑现“干净环境启动”。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>和 issue #2004 的关系</h2>
+    <p>issue 中的“沙箱执行需要有超时、输出大小限制、环境变量白名单、artifact 限制和失败记录”，对应的背景知识分别落在 <code>RunProgramSpec.Timeout</code>、<code>OutputSpec</code>、<code>CleanEnv</code> / env policy、artifact collection 和 <code>RunResult</code> / error handling 上。</p>
+  </section>
+
+  <section>
+    <h2>练习</h2>
+    <details>
+      <summary>1. 命令退出码是 1，<code>err</code> 一定非 nil 吗？</summary>
+      <p>不一定。非零退出码通常在 <code>RunResult.ExitCode</code> 中表达，runtime 层失败才更可能是 Go error。</p>
+    </details>
+    <details>
+      <summary>2. 输出文件太大应该靠什么背景概念理解？</summary>
+      <p><code>OutputSpec.MaxFileBytes</code>、<code>MaxTotalBytes</code>、<code>Collect</code> 的 truncation，以及 artifact 限制。</p>
+    </details>
+    <details>
+      <summary>3. 什么时候你需要关心 <code>SupportsCleanEnv</code>？</summary>
+      <p>当你给 <code>workspace_exec</code> 配置命令白名单或黑名单时。它表示当前 executor 是否能让命令从干净环境启动；不支持时，框架应拒绝执行。</p>
+    </details>
+  </section>
+
+  <section>
+    <h2>来源</h2>
+    <ul>
+      <li><a href="../codeexecutor/workspace.go">codeexecutor/workspace.go</a></li>
+      <li><a href="../codeexecutor/manifest.go">codeexecutor/manifest.go</a></li>
+      <li><a href="../examples/workspace_io/README.md">examples/workspace_io/README.md</a></li>
+      <li><a href="../tool/workspaceexec/workspace_exec.go">tool/workspaceexec/workspace_exec.go</a></li>
+    </ul>
+    <p>速查：<a href="../reference/0003-skills-codeexecutor-cheatsheet.html">Skills 与 CodeExecutor 速查</a>。</p>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第六课：工具、过滤、权限与结构化输出</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Lesson 0006 · 预计 18 分钟</p>
+    <h1>工具、过滤、权限与结构化输出</h1>
+    <p class="lede">这一课解决“Agent 怎么做事”。重点不是某个具体工具，而是四个框架边界：注册工具、过滤可见工具、拦截工具执行、返回结构化结果。</p>
+  </header>
+
+  <section>
+    <h2>一张边界图</h2>
+    <div class="flow" aria-label="tool control layers">
+      <span>WithTools / WithToolSets</span>
+      <span>Tool Filter</span>
+      <span>模型产生 tool call</span>
+      <span>PermissionPolicy</span>
+      <span>工具执行</span>
+      <span>Event / StructuredOutput</span>
+    </div>
+    <p>注册工具只是“Agent 拥有哪些能力”。Filter 决定“本轮模型看得到哪些工具”。PermissionPolicy 决定“模型已经请求调用某个工具时，框架是否真的执行”。这三层不能互相替代。</p>
+  </section>
+
+  <section>
+    <h2>Function Tool 是最小工具单元</h2>
+    <pre><code class="language-go">func inspectFile(ctx context.Context, req struct {
+    Path string `json:"path" jsonschema:"description=relative file path"`
+}) (map[string]any, error) {
+    // Tool code should still enforce its own input rules.
+    return map[string]any{"path": req.Path, "ok": true}, nil
+}
+
+inspectTool := function.NewFunctionTool(
+    inspectFile,
+    function.WithName("inspect_file"),
+    function.WithDescription("Read metadata for one relative file path."),
+)
+
+agentInstance := llmagent.New(
+    "worker",
+    llmagent.WithModel(modelInstance),
+    llmagent.WithTools([]tool.Tool{inspectTool}),
+)</code></pre>
+    <p><code>name</code> 和 <code>description</code> 不是装饰。文档建议它们稳定、唯一、语义清楚，因为模型靠它们判断何时调用工具。</p>
+  </section>
+
+  <section>
+    <h2>Filter 控制“看得见”</h2>
+    <p>先把规则钉死：<code>ToolFilter</code> 是一个函数。框架拿每个工具问它一次：这个工具要不要放进本轮发给模型的工具列表？</p>
+    <pre><code class="language-go">type FilterFunc func(ctx context.Context, t tool.Tool) bool
+
+// return true  = 这个工具保留，模型看得见
+// return false = 这个工具过滤掉，模型看不见</code></pre>
+    <p>所以 filter 不是“执行工具”，也不是“安全审批”。它只改一件事：本轮模型请求里带哪些工具声明。</p>
+    <p>再看一个完整场景：Agent 启动时注册了三个工具，但某一次 run 只想让模型看到其中一个。</p>
+    <pre><code class="language-go">agentInstance := llmagent.New(
+    "worker",
+    llmagent.WithModel(modelInstance),
+    llmagent.WithTools([]tool.Tool{
+        inspectFileTool,   // name: inspect_file
+        writeFileTool,     // name: write_file
+        deleteFileTool,    // name: delete_file
+    }),
+)</code></pre>
+    <p>这表示 Agent 拥有三个工具能力。默认情况下，框架会把这三个工具的 name、description 和参数 schema 都放进发给模型的请求里，模型就可能选择调用其中任意一个。</p>
+    <pre><code class="language-go">filter := tool.NewIncludeToolNamesFilter("inspect_file")
+
+events, err := r.Run(
+    ctx,
+    userID,
+    sessionID,
+    model.NewUserMessage("inspect this repository"),
+    agent.WithToolFilter(filter),
+)</code></pre>
+    <p><code>NewIncludeToolNamesFilter("inspect_file")</code> 是白名单：只保留这个名字的工具。它不是屏蔽 <code>inspect_file</code>，而是屏蔽除了 <code>inspect_file</code> 以外的工具。模型看到的是：</p>
+    <pre><code class="language-text">inspect_file  ✅ 可见
+write_file    ❌ 不发给模型
+delete_file   ❌ 不发给模型</code></pre>
+    <p>如果你想隐藏某些工具，用 exclude：</p>
+    <pre><code class="language-go">filter := tool.NewExcludeToolNamesFilter("delete_file")
+
+// 结果：
+// inspect_file  可见
+// write_file    可见
+// delete_file   不可见</code></pre>
+    <p>如果规则不是固定名字，也可以自己写函数：</p>
+    <pre><code class="language-go">filter := func(ctx context.Context, t tool.Tool) bool {
+    d := t.Declaration()
+    if d == nil {
+        return false
+    }
+    return strings.HasPrefix(d.Name, "inspect_")
+}
+
+events, err := r.Run(
+    ctx,
+    userID,
+    sessionID,
+    model.NewUserMessage("inspect this repository"),
+    agent.WithToolFilter(filter),
+)</code></pre>
+    <p>这段自定义 filter 的意思是：只让模型看到名字以 <code>inspect_</code> 开头的工具。</p>
+  </section>
+
+  <section>
+    <h2>Tool Filter 到底改了什么</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>阶段</th>
+        <th>没有 filter</th>
+        <th>有 <code>Include(inspect_file)</code></th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>Agent 配置</td>
+        <td>三个工具都注册在 Agent 上。</td>
+        <td>三个工具仍然注册在 Agent 上。</td>
+      </tr>
+      <tr>
+        <td>发给模型的工具列表</td>
+        <td><code>inspect_file</code>、<code>write_file</code>、<code>delete_file</code></td>
+        <td>只有 <code>inspect_file</code></td>
+      </tr>
+      <tr>
+        <td>模型能主动选择的 tool call</td>
+        <td>三个都可能被模型选择。</td>
+        <td>模型正常情况下只会选择 <code>inspect_file</code>。</td>
+      </tr>
+      <tr>
+        <td>是否是安全审批</td>
+        <td>不是。</td>
+        <td>也不是。安全审批看 <code>PermissionPolicy</code> 或工具自身校验。</td>
+      </tr>
+      </tbody>
+    </table>
+    <p>你可以把 Tool Filter 理解成“本轮给模型看的工具菜单”。菜单上没有 <code>delete_file</code>，模型就不会被鼓励去点它，也不会为它消耗工具描述 token。</p>
+    <h3>为什么不一开始就少注册工具？</h3>
+    <p>因为注册工具和过滤工具是两个不同层级。</p>
+    <table>
+      <thead>
+      <tr>
+        <th>做法</th>
+        <th>发生时间</th>
+        <th>适合解决什么</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>WithTools</code></td>
+        <td>创建 Agent 时。</td>
+        <td>声明这个 Agent 总共会哪些工具。</td>
+      </tr>
+      <tr>
+        <td><code>WithToolFilter</code></td>
+        <td>每次 <code>Run</code> 时。</td>
+        <td>声明这一轮模型能看到哪些工具。</td>
+      </tr>
+      </tbody>
+    </table>
+    <p>如果一个服务里同一个 Agent 要服务不同场景，filter 就有意义：普通用户这一轮只看只读工具，管理员这一轮能看到写入工具；dry-run 只看 inspect/report 工具，真实执行再开放 write/apply 工具；某个 workflow 的第一步只给收集信息的工具，第二步才给生成报告的工具。</p>
+    <div class="callout">
+      <p>Filter 适合做动态可见性：比如同一个 Agent 服务普通用户和管理员，普通用户这一轮只看只读工具，管理员这一轮还能看到写入工具。它不是最终安全边界，因为真正执行前仍应由工具代码、PermissionPolicy、workspace policy 等机制兜住。</p>
+    </div>
+    <h3>动态规则怎么写</h3>
+    <p><code>WithToolFilter</code> 是 per-run 选项，所以 filter 可以读这一次 run 的上下文，而不是只能写死工具名。</p>
+    <pre><code class="language-go">roleFromRequest := "reader"
+
+filter := func(ctx context.Context, t tool.Tool) bool {
+    d := t.Declaration()
+    if d == nil {
+        return false
+    }
+
+    role, _ := agent.GetRuntimeStateValueFromContext[string](ctx, "role")
+    if role != "admin" &amp;&amp; d.Name == "delete_file" {
+        return false
+    }
+    return true
+}
+
+events, err := r.Run(ctx, userID, sessionID, message,
+    agent.WithRuntimeState(map[string]any{"role": roleFromRequest}),
+    agent.WithToolFilter(filter),
+)</code></pre>
+    <p>这段规则的读法是：这一次 run 把 <code>role</code> 放进 runtime state；filter 从 context 里取出 <code>role</code>；如果不是 admin，就把 <code>delete_file</code> 从本轮模型工具列表里拿掉；其他工具保留。</p>
+    <p>源码里的关键点也只有这几条：<code>tool.FilterTools</code> 遍历工具，filter 返回 <code>true</code> 才 append；<code>NewIncludeToolNamesFilter</code> 命中名字才返回 <code>true</code>；<code>NewExcludeToolNamesFilter</code> 命中名字才返回 <code>false</code>。<code>llmflow</code> 在 preprocess 阶段应用这个 filter，然后再构造发给模型的请求。</p>
+  </section>
+
+  <section>
+    <h2>PermissionPolicy 控制“能不能执行”</h2>
+    <pre><code class="language-go">policy := func(
+    ctx context.Context,
+    req *tool.PermissionRequest,
+) (tool.PermissionDecision, error) {
+    if req.Metadata.Destructive {
+        approved, err := askHostApplication(ctx, req)
+        if err != nil {
+            return tool.PermissionDecision{}, err
+        }
+        if !approved {
+            return tool.DenyPermission("user rejected destructive tool"), nil
+        }
+    }
+    if req.Metadata.OpenWorld {
+        return tool.DenyPermission("open-world tool is disabled"), nil
+    }
+    return tool.AllowPermission(), nil
+}
+
+events, err := r.Run(
+    ctx,
+    userID,
+    sessionID,
+    message,
+    agent.WithToolPermissionPolicyFunc(policy),
+)</code></pre>
+    <p>这段代码里的 <code>askHostApplication</code> 代表你的宿主程序自己的确认流程：CLI 可以读 stdin，Web 服务可以查一个审批系统，桌面应用可以弹确认框。关键点是：如果要让这个 tool call 真的执行，policy 必须在返回前拿到批准，然后返回 <code>AllowPermission()</code>。</p>
+    <p>框架会在工具真正执行前拿到 <code>PermissionDecision</code>，然后决定是否继续执行工具。</p>
+    <table>
+      <thead>
+      <tr>
+        <th>policy 返回</th>
+        <th>框架动作</th>
+        <th>模型收到的 tool result</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>tool.AllowPermission()</code></td>
+        <td>继续执行真实工具。</td>
+        <td>真实工具返回值。</td>
+      </tr>
+      <tr>
+        <td><code>tool.DenyPermission("...")</code></td>
+        <td>跳过真实工具，不调用工具函数。</td>
+        <td><code>{"status":"denied","tool":"...","reason":"..."}</code></td>
+      </tr>
+      <tr>
+        <td><code>tool.AskPermission("...")</code></td>
+        <td>跳过真实工具，不调用工具函数。</td>
+        <td><code>{"status":"approval_required","tool":"...","reason":"..."}</code></td>
+      </tr>
+      </tbody>
+    </table>
+    <p>也就是说，<code>DenyPermission</code> 和 <code>AskPermission</code> 都会阻止工具执行。区别只在返回给模型的状态：一个是已经拒绝，一个是需要审批。</p>
+    <h3><code>AskPermission</code> 不能完成“批准后继续执行”</h3>
+    <p><code>AskPermission</code> 不会自动弹出确认框，不会暂停等待用户，也不会在模型后面总结“需要审批”以后重新执行原来的 tool call。它的实际效果是：本次工具调用被跳过，模型收到一个 <code>approval_required</code> 的 tool result。</p>
+    <p>所以，如果正常产品流程要求“用户点同意，然后这个工具继续执行”，不要让 policy 返回 <code>AskPermission</code>。应该在 policy 里面先询问宿主系统，批准就返回 <code>AllowPermission()</code>，拒绝就返回 <code>DenyPermission(...)</code>：</p>
+    <pre><code class="language-go">policy := func(
+    ctx context.Context,
+    req *tool.PermissionRequest,
+) (tool.PermissionDecision, error) {
+    if !req.Metadata.Destructive {
+        return tool.AllowPermission(), nil
+    }
+
+    approved, err := askHostApplication(ctx, req)
+    if err != nil {
+        return tool.PermissionDecision{}, err
+    }
+    if !approved {
+        return tool.DenyPermission("user rejected destructive tool"), nil
+    }
+    return tool.AllowPermission(), nil
+}</code></pre>
+    <p>如果你的应用没办法在 policy 里同步拿到批准，而是要把请求发给外部系统、人类队列或前端页面，那就不要把 <code>AskPermission</code> 误当成“可恢复审批”。这时需要把审批做成宿主工作流：例如先记录待审批请求，run 结束后由业务系统批准，再重新发起下一轮；或者使用框架里更适合中断/恢复的 graph interrupt、external tool、人机循环模式。<code>PermissionPolicy</code> 这一层只负责“当前这个 tool call 是否立刻执行”。</p>
+    <div class="callout">
+      <p><code>ask</code> 是“本次不执行，并把 approval_required 交给模型”的状态，不是“等用户同意后继续执行”的机制。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>结构化输出不要选错 API</h2>
+    <p>这里的“结构化输出”不是工具调用参数。工具调用参数本来就是结构化 JSON，例如模型调用 <code>inspect_file</code> 时会给出 <code>{"path":"..."}</code>。这一节说的是：工具都调用完以后，Agent 最后交给你的应用程序的结果，要不要是一个稳定的 Go struct 或 JSON schema。</p>
+    <div class="flow" aria-label="tool calls and final structured output">
+      <span>模型决定调用工具</span>
+      <span>tool call 参数 JSON</span>
+      <span>框架执行工具</span>
+      <span>tool result 返回模型</span>
+      <span>模型生成最终答案</span>
+      <span>event.StructuredOutput</span>
+    </div>
+    <p>所以有两种结构化数据：</p>
+    <table>
+      <thead>
+      <tr>
+        <th>结构化对象</th>
+        <th>谁用它</th>
+        <th>例子</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>Tool call arguments</td>
+        <td>框架用它来调用某个工具。</td>
+        <td><code>inspect_file({"path":"main.go"})</code></td>
+      </tr>
+      <tr>
+        <td>Final structured output</td>
+        <td>你的 Go 应用用它来读取 Agent 最终结果。</td>
+        <td><code>ReviewReport{Findings: ...}</code></td>
+      </tr>
+      </tbody>
+    </table>
+    <p>这张表比较的是第二种：最终结果怎么输出。</p>
+    <table>
+      <thead>
+      <tr>
+        <th>API</th>
+        <th>能否同时用工具</th>
+        <th>结果在哪里</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>WithStructuredOutputJSON</code></td>
+        <td>可以</td>
+        <td><code>event.StructuredOutput</code>，类型来自 Go struct</td>
+      </tr>
+      <tr>
+        <td><code>WithStructuredOutputJSONSchema</code></td>
+        <td>可以</td>
+        <td><code>event.StructuredOutput</code>，通常是 <code>map[string]any</code></td>
+      </tr>
+      <tr>
+        <td><code>WithOutputSchema</code></td>
+        <td>不可以</td>
+        <td>模型响应内容；文档把它标为不适合需要工具的场景</td>
+      </tr>
+      <tr>
+        <td><code>WithOutputKey</code></td>
+        <td>可以</td>
+        <td>Session state，适合下游 Agent 读取</td>
+      </tr>
+      </tbody>
+    </table>
+    <p>如果一个 Agent 既要探索环境、调用工具，又要最后产出 JSON 结构，优先看 <code>WithStructuredOutputJSON</code> 或 <code>WithStructuredOutputJSONSchema</code>，不要把 <code>WithOutputSchema</code> 当默认选择。</p>
+  </section>
+
+  <section>
+    <h2>typed structured output 骨架</h2>
+    <p>比如你希望 Agent 可以先调用工具收集信息，最后给你的 Go 程序一个稳定结构：</p>
+    <pre><code class="language-go">type Result struct {
+    Status string   `json:"status"`
+    Notes  []string `json:"notes"`
+}
+
+agentInstance := llmagent.New(
+    "worker",
+    llmagent.WithModel(modelInstance),
+    llmagent.WithTools([]tool.Tool{inspectTool}),
+    llmagent.WithStructuredOutputJSON(new(Result), true, "final result"),
+)
+
+for evt := range events {
+    if out, ok := evt.StructuredOutput.(*Result); ok {
+        _ = out
+    }
+}</code></pre>
+    <p>这不影响模型在中途调用 <code>inspectTool</code>。它只是要求模型最终结果符合 <code>Result</code> 的 schema，并由框架解析到 <code>event.StructuredOutput</code>。</p>
+    <p>同样的 structured output 也可以作为单次 <code>runner.Run</code> 的 option 注入。Agent 级配置适合默认行为；run 级配置适合本次请求覆盖。</p>
+  </section>
+
+  <section>
+    <h2>实现复杂 Agent 时的判断顺序</h2>
+    <ol>
+      <li>这个能力是模型应主动选择的吗？是的话做成 Tool 或 ToolSet。</li>
+      <li>这个能力是否只在部分 run 可用？是的话加 Tool Filter。</li>
+      <li>这个能力是否可能读外部世界、改文件、执行命令或暴露敏感信息？是的话加 PermissionPolicy 或工具内强约束。</li>
+      <li>最终结果需要机器读取吗？是的话用 structured output，而不是要求模型“请输出 JSON”。</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>练习</h2>
+    <details>
+      <summary>1. Tool Filter 和 PermissionPolicy 最大区别是什么？</summary>
+      <p>Filter 改的是“发给模型看的工具菜单”；PermissionPolicy 管的是“模型已经点了某个工具后，框架是否允许执行”。</p>
+    </details>
+    <details>
+      <summary>2. 为什么需要 tools 的 Agent 不该默认用 WithOutputSchema？</summary>
+      <p>因为文档说明 <code>WithOutputSchema</code> 会禁用工具。需要工具和结构化结果时应使用 <code>WithStructuredOutputJSON</code> 或 <code>WithStructuredOutputJSONSchema</code>。</p>
+    </details>
+    <details>
+      <summary>3. ask 决策是否等于框架会弹出确认框？</summary>
+      <p>不是。<code>ask</code> 表示需要审批的工具结果语义；真正的人机确认要由应用或 policy 自己处理。</p>
+    </details>
+  </section>
+
+  <section>
+    <h2>来源</h2>
+    <ul>
+      <li><a href="../docs/mkdocs/zh/tool.md">Tool 文档</a></li>
+      <li><a href="../tool/filter.go">tool/filter.go</a></li>
+      <li><a href="../internal/flow/llmflow/llmflow.go">llmflow tool filtering</a></li>
+      <li><a href="../examples/outputschema/README.md">Structured output 对比</a></li>
+      <li><a href="../agent/llmagent/option.go">LLMAgent structured output options</a></li>
+      <li><a href="../agent/invocation.go">Run-level structured output options</a></li>
+      <li><a href="../tool/permission.go">Permission decision API</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

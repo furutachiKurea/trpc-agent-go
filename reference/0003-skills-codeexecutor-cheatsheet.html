@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skills 与 CodeExecutor 速查</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Reference 0003</p>
+    <h1>Skills 与 CodeExecutor 速查</h1>
+    <p class="lede">issue #2004 会同时用到可复用工作流和隔离执行。这个速查只记录通用框架 API，不提供 issue 专属实现方案。</p>
+  </header>
+
+  <section>
+    <h2>Skill 的三层信息模型</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>层</th>
+        <th>框架行为</th>
+        <th>你要记住的边界</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>Overview</td>
+        <td>注入 skill 的 <code>name</code> 和 <code>description</code>。</td>
+        <td>让模型知道有什么 skill，但不加载全文。</td>
+      </tr>
+      <tr>
+        <td><code>skill_load</code></td>
+        <td>按需加载 <code>SKILL.md</code> 正文和选定 docs。</td>
+        <td>加载知识，不执行脚本。</td>
+      </tr>
+      <tr>
+        <td><code>workspace_exec</code></td>
+        <td>在 workspace 中执行命令或脚本。</td>
+        <td>执行发生在 executor 提供的 workspace。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>启用 Skill 的常见形状</h2>
+    <pre><code class="language-go">repo, err := skill.NewFSRepository("./skills")
+if err != nil {
+    return err
+}
+
+agt := llmagent.New(
+    "skills-agent",
+    llmagent.WithSkills(repo),
+    llmagent.WithCodeExecutor(exec),
+    llmagent.WithEnableCodeExecutionResponseProcessor(false),
+)</code></pre>
+    <p><code>WithSkills</code> 注册知识注入工具；<code>WithCodeExecutor</code> 让执行类工具可用；fenced-code 自动执行是独立开关。</p>
+  </section>
+
+  <section>
+    <h2>CodeExecutor / Workspace 的核心结构</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>类型</th>
+        <th>含义</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>RunProgramSpec</code></td>
+        <td>一次程序执行请求：命令、参数、环境变量、cwd、stdin、timeout、资源限制。</td>
+      </tr>
+      <tr>
+        <td><code>RunResult</code></td>
+        <td>一次执行结果：stdout、stderr、exit code、duration、timed out。</td>
+      </tr>
+      <tr>
+        <td><code>InputSpec</code></td>
+        <td>把 artifact、host 路径、workspace 路径或 skill 文件映射到 workspace。</td>
+      </tr>
+      <tr>
+        <td><code>OutputSpec</code></td>
+        <td>声明要收集的输出、文件数限制、单文件/总大小限制、是否保存 artifact。</td>
+      </tr>
+      <tr>
+        <td><code>Capabilities.SupportsCleanEnv</code></td>
+        <td>当前 executor 是否能在执行命令时丢掉宿主环境，只使用框架明确传入的环境。配置 <code>WithWorkspaceExecAllowedCommands</code> / <code>WithWorkspaceExecDeniedCommands</code> 后，<code>workspace_exec</code> 会依赖它；不支持就拒绝执行。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>SupportsCleanEnv 的触发点</h2>
+    <pre><code class="language-go">agt := llmagent.New(
+    "worker",
+    llmagent.WithCodeExecutor(exec),
+    llmagent.WithWorkspaceExecAllowedCommands("go", "git", "cat"),
+)</code></pre>
+    <p>这段配置表示：模型可以用 <code>workspace_exec</code> 跑命令，但命令必须在白名单里。为了让这个限制不是“只看命令名”的弱约束，框架还要求 executor 支持干净环境启动。</p>
+    <table>
+      <thead>
+      <tr>
+        <th>你做了什么</th>
+        <th>框架行为</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>只配置 <code>WithCodeExecutor</code></td>
+        <td><code>workspace_exec</code> 可用；命令执行按 executor 默认行为走。</td>
+      </tr>
+      <tr>
+        <td>再配置 allowed / denied commands</td>
+        <td><code>workspace_exec</code> 进入 policy mode，命令需要通过结构检查和命令名策略。</td>
+      </tr>
+      <tr>
+        <td>executor 声明 <code>SupportsCleanEnv=true</code></td>
+        <td>policy mode 可以执行，子进程从干净环境启动。</td>
+      </tr>
+      <tr>
+        <td>executor 不支持 <code>CleanEnv</code></td>
+        <td>policy mode 直接失败，避免安全策略被静默降级。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>RunResult 的判断顺序</h2>
+    <ol>
+      <li>先看是否有 Go error：这通常表示 runtime 层失败。</li>
+      <li>再看 <code>TimedOut</code>：命令是否超时。</li>
+      <li>再看 <code>ExitCode</code>：程序是否以非零状态退出。</li>
+      <li>最后读取 <code>Stdout</code> / <code>Stderr</code>：提取诊断输出。</li>
+    </ol>
+    <div class="callout">
+      <p>非零 exit code 不一定是 Go error。它通常是程序自己的结果，需要从 <code>RunResult</code> 里判断。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>来源</h2>
+    <ul>
+      <li><a href="../docs/mkdocs/en/skill.md">docs/mkdocs/en/skill.md</a></li>
+      <li><a href="../codeexecutor/workspace.go">codeexecutor/workspace.go</a></li>
+      <li><a href="../codeexecutor/manifest.go">codeexecutor/manifest.go</a></li>
+      <li><a href="../examples/workspace_io/README.md">examples/workspace_io/README.md</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

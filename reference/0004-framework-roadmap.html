@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tRPC-Agent-Go 框架学习路线图</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Reference 0004</p>
+    <h1>tRPC-Agent-Go 框架学习路线图</h1>
+    <p class="lede">从“会写一个完整 Agent”倒推的学习路线。先掌握框架主干，再理解代码评审任务会用到的安全、存储、可观测和报告背景。</p>
+  </header>
+
+  <section>
+    <h2>主干心智模型</h2>
+    <div class="flow" aria-label="trpc agent go runtime flow">
+      <span>model.Model</span>
+      <span>llmagent.New</span>
+      <span>runner.NewRunner</span>
+      <span>runner.Run</span>
+      <span>event stream</span>
+      <span>session service</span>
+      <span>tools / skills / executor</span>
+      <span>structured output</span>
+    </div>
+    <p>框架应用不是从一个固定 <code>main.go</code> 开始，而是围绕 <code>Agent</code> 和 <code>Runner</code> 组合。<code>LLMAgent</code> 挂模型、指令、工具、Skill、结构化输出等能力；<code>Runner</code> 负责 session、invocation、事件流和完成事件。</p>
+  </section>
+
+  <section>
+    <h2>应该先学什么</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>顺序</th>
+        <th>能力</th>
+        <th>为什么实现任务时会遇到</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>1</td>
+        <td>最小 <code>LLMAgent</code> + <code>Runner</code> 闭环</td>
+        <td>任何可执行 Agent 都要有模型、Agent、Runner、输入消息、事件消费。</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td>事件流和完成条件</td>
+        <td>工具调用、工具结果、最终回答、错误和结构化输出都通过 event 暴露。</td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td>fake model / deterministic model</td>
+        <td>无真实 API key 时仍要验证完整链路，必须知道如何让模型行为可控。</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td>Function Tool、ToolSet、Tool Filter、PermissionPolicy</td>
+        <td>Agent 需要探索代码库和执行检查，但执行前必须有可治理边界。</td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td>Skill 加载与 workspace 执行</td>
+        <td>Skill 是可加载知识和工作流，不等于直接执行脚本；执行通过工具进入 workspace。</td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td>CodeExecutor / Workspace / RunResult</td>
+        <td>运行测试、静态检查或脚本时，要理解工作区、输入、输出、退出码，以及命令白名单依赖的干净环境能力。</td>
+      </tr>
+      <tr>
+        <td>7</td>
+        <td>Session / SQLite storage</td>
+        <td>可复查系统需要保存 run、事件、状态、审计记录和报告相关数据。</td>
+      </tr>
+      <tr>
+        <td>8</td>
+        <td>Telemetry / callbacks</td>
+        <td>耗时、工具调用、异常、权限拦截和模型行为需要可观测。</td>
+      </tr>
+      <tr>
+        <td>9</td>
+        <td>structured output</td>
+        <td>需要同时使用 tools 和产出结构化结果时，应避开会禁用工具的输出方式。</td>
+      </tr>
+      <tr>
+        <td>10</td>
+        <td>unified diff 和 Go 代码评审背景</td>
+        <td>Agent 能力只是载体；判断问题还需要 diff、行号、Go package、test/vet 等领域知识。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>最小代码骨架</h2>
+    <pre><code class="language-go">modelInstance := openai.New("gpt-4o-mini")
+
+agentInstance := llmagent.New(
+    "assistant",
+    llmagent.WithModel(modelInstance),
+    llmagent.WithInstruction("Be concise and use tools when useful."),
+)
+
+r := runner.NewRunner("my-app", agentInstance)
+defer r.Close()
+
+events, err := r.Run(
+    ctx,
+    "user-1",
+    "session-1",
+    model.NewUserMessage("hello"),
+)
+if err != nil {
+    return err
+}
+
+for evt := range events {
+    if evt.Error != nil {
+        return fmt.Errorf("agent event error: %s", evt.Error.Message)
+    }
+    if evt.IsRunnerCompletion() {
+        break
+    }
+}</code></pre>
+    <p>这段骨架是后面所有能力的挂载点：工具挂到 <code>LLMAgent</code>，session service 挂到 <code>Runner</code>，单次运行策略通过 <code>runner.Run</code> 的 options 注入。</p>
+  </section>
+
+  <section>
+    <h2>常见误区</h2>
+    <div class="grid">
+      <div class="panel">
+        <h3>把 Agent 当命令行程序</h3>
+        <p>框架核心是可组合运行单元。CLI 只是宿主；Agent 本身通过 Runner、Session 和 Event 与外界交互。</p>
+      </div>
+      <div class="panel">
+        <h3>只看最终文本</h3>
+        <p>工具调用、权限拒绝、结构化输出、错误和 token usage 都可能在事件中。只看最终文本会漏掉系统行为。</p>
+      </div>
+      <div class="panel">
+        <h3>把测试等同真实模型</h3>
+        <p>框架层测试通常用 fake model 控制请求和响应。真实模型验证是另一类问题。</p>
+      </div>
+      <div class="panel">
+        <h3>把 Storage 当聊天历史</h3>
+        <p>Session 保存的不只是聊天上下文，还可以承载状态、事件和后续审计所需的数据入口。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>主要来源</h2>
+    <ul>
+      <li><a href="../docs/mkdocs/zh/agent.md">Agent 文档</a></li>
+      <li><a href="../docs/mkdocs/zh/runner.md">Runner 文档</a></li>
+      <li><a href="../docs/mkdocs/zh/event.md">Event 文档</a></li>
+      <li><a href="../docs/mkdocs/zh/tool.md">Tool 文档</a></li>
+      <li><a href="../docs/mkdocs/en/skill.md">Skill 文档</a></li>
+      <li><a href="../docs/mkdocs/zh/session/sqlite.md">SQLite Session 文档</a></li>
+      <li><a href="../docs/mkdocs/zh/observability.md">Observability 文档</a></li>
+      <li><a href="../examples/runner/main.go">Runner example</a></li>
+      <li><a href="../examples/skillloadmode/main.go">Skill load mode example</a></li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第五课：最小 Agent 运行闭环</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Lesson 0005 · 预计 15 分钟</p>
+    <h1>最小 Agent 运行闭环</h1>
+    <p class="lede">这一课不讲代码评审需求，只讲 tRPC-Agent-Go 的最小可运行模型：模型、LLMAgent、Runner、Run、Event、Session。你先能跑通这个闭环，后面的工具、Skill、沙箱和报告才有位置挂。</p>
+  </header>
+
+  <section>
+    <h2>先记住一张图</h2>
+    <div class="flow" aria-label="minimal runtime loop">
+      <span>用户消息</span>
+      <span>runner.Run</span>
+      <span>Invocation</span>
+      <span>LLMAgent</span>
+      <span>model.GenerateContent</span>
+      <span>Event</span>
+      <span>Session</span>
+    </div>
+    <p><code>Runner</code> 是应用侧调用入口。它拿到用户、session 和消息，构造 invocation，调用 Agent，然后把 Agent 返回的事件流交给调用方，同时把非 partial 响应追加到 session。</p>
+  </section>
+
+  <section>
+    <h2>四个对象的职责</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>对象</th>
+        <th>你应该怎么理解</th>
+        <th>常见 API</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td><code>model.Model</code></td>
+        <td>模型适配器。真实模型、mock 模型、deterministic 模型都实现同一个接口。</td>
+        <td><code>GenerateContent</code>、<code>Info</code></td>
+      </tr>
+      <tr>
+        <td><code>llmagent.LLMAgent</code></td>
+        <td>把模型、指令、工具、Skill、输出约束组合成一个 Agent。</td>
+        <td><code>llmagent.New</code>、<code>WithModel</code>、<code>WithTools</code></td>
+      </tr>
+      <tr>
+        <td><code>runner.Runner</code></td>
+        <td>外层执行器。管理 session、invocation ID、事件处理、完成事件和插件。</td>
+        <td><code>runner.NewRunner</code>、<code>Run</code>、<code>Close</code></td>
+      </tr>
+      <tr>
+        <td><code>event.Event</code></td>
+        <td>运行时观察窗口。文本、工具调用、工具结果、错误、结构化输出都从这里看。</td>
+        <td><code>Error</code>、<code>Response</code>、<code>StructuredOutput</code>、<code>IsRunnerCompletion</code></td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>最小真实模型版本</h2>
+    <pre><code class="language-go">func buildRunner() runner.Runner {
+    m := openai.New("gpt-4o-mini")
+
+    a := llmagent.New(
+        "assistant",
+        llmagent.WithModel(m),
+        llmagent.WithInstruction("Answer clearly and briefly."),
+    )
+
+    return runner.NewRunner("demo-app", a)
+}</code></pre>
+    <p>这只说明框架组合方式。真实运行还需要 provider 的 API key；但学习框架时，不应该把“模型服务是否可用”和“Runner/Agent 怎么组合”混在一起。</p>
+  </section>
+
+  <section>
+    <h2>事件消费不是随便 range</h2>
+    <pre><code class="language-go">events, err := r.Run(ctx, userID, sessionID, model.NewUserMessage(input))
+if err != nil {
+    return err
+}
+
+for evt := range events {
+    if evt.Error != nil {
+        return fmt.Errorf("agent event error: %s", evt.Error.Message)
+    }
+
+    if evt.StructuredOutput != nil {
+        // typed or untyped structured result, depending on the option used
+    }
+
+    if evt.IsRunnerCompletion() {
+        break
+    }
+}</code></pre>
+    <div class="callout">
+      <p><code>Response.Done</code> 不一定等于整次运行结束。文档建议以 Runner completion event 作为完成信号，尤其是涉及工具或图式流程时。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>fake model 为什么重要</h2>
+    <p>实现复杂 Agent 时，不要把所有验证都绑到真实模型。框架的 <code>model.Model</code> 是接口；测试或 dry-run 可以实现一个 deterministic model：它记录请求，按脚本返回工具调用、工具结果后的最终回答，或者直接返回结构化输出。</p>
+    <pre><code class="language-go">type scriptedModel struct {
+    responses []*model.Response
+}
+
+func (m *scriptedModel) Info() model.Info {
+    return model.Info{Name: "scripted"}
+}
+
+func (m *scriptedModel) GenerateContent(
+    ctx context.Context,
+    req *model.Request,
+) (&lt;-chan *model.Response, error) {
+    ch := make(chan *model.Response, len(m.responses))
+    go func() {
+        defer close(ch)
+        for _, resp := range m.responses {
+            select {
+            case &lt;-ctx.Done():
+                return
+            case ch &lt;- resp:
+            }
+        }
+    }()
+    return ch, nil
+}</code></pre>
+    <p>这个能力和具体代码评审规则无关。它解决的是“如何在没有真实模型 API key 时验证 agent 链路”这个框架使用问题。</p>
+  </section>
+
+  <section>
+    <h2>练习</h2>
+    <details>
+      <summary>1. 为什么 Runner 比直接调用 Agent 更适合作为入口？</summary>
+      <p>Runner 集成了 session、invocation ID、事件处理、完成事件、插件和运行选项。直接调用 Agent 会绕开这些应用层职责。</p>
+    </details>
+    <details>
+      <summary>2. fake model 应该 fake 哪一层？</summary>
+      <p>fake <code>model.Model</code>，不是 fake Runner。这样仍能走真实 LLMAgent、工具、事件和 session 链路。</p>
+    </details>
+    <details>
+      <summary>3. 为什么只看最终文本不够？</summary>
+      <p>工具调用、权限决策后的工具结果、错误、结构化输出和 usage 都在事件里。最终文本只覆盖一部分行为。</p>
+    </details>
+  </section>
+
+  <section>
+    <h2>下一步</h2>
+    <p>先把这节和 <a href="../reference/0004-framework-roadmap.html">框架路线图</a> 看成学习入口。下一节应讲 tools 与 structured output 的组合，因为这是从“聊天 Agent”进入“能做事的 Agent”的第一道门。</p>
+    <p class="meta">主要来源：<a href="../docs/mkdocs/zh/runner.md">Runner 文档</a>、<a href="../docs/mkdocs/zh/agent.md">Agent 文档</a>、<a href="../docs/mkdocs/zh/event.md">Event 文档</a>、<a href="../model/model.go">model.Model 接口</a>、<a href="../examples/runner/main.go">Runner example</a>。</p>
+  </section>
+</main>
+</body>
+</html>

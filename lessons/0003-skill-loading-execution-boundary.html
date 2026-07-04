@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第三课：Skill 的加载与执行边界</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Lesson 0003 · 预计 15 分钟</p>
+    <h1>Skill 的加载与执行边界</h1>
+    <p class="lede">这一课只讲框架通用能力：Skill 如何被发现、加载，以及脚本为什么不由 <code>skill_load</code> 执行。这个边界是读懂 issue #2004 的基础。</p>
+  </header>
+
+  <section>
+    <h2>Skill 是什么</h2>
+    <p>在 tRPC-Agent-Go 中，Skill 是一个目录，核心是 <code>SKILL.md</code>，旁边可以有 docs 和 scripts。它表达的是可复用工作流，而不是一个 Go 类型或一个普通函数。</p>
+    <pre><code>skills/
+  demo/
+    SKILL.md
+    docs/usage.md
+    scripts/check.sh</code></pre>
+  </section>
+
+  <section>
+    <h2>启用 Skill</h2>
+    <p>通用 API 形状如下：</p>
+    <pre><code class="language-go">repo, err := skill.NewFSRepository("./skills")
+if err != nil {
+    return err
+}
+
+agt := llmagent.New(
+    "skills-agent",
+    llmagent.WithSkills(repo),
+    llmagent.WithCodeExecutor(exec),
+    llmagent.WithEnableCodeExecutionResponseProcessor(false),
+)</code></pre>
+    <p><code>WithSkills</code> 让 agent 知道有哪些 skill，并注册内置 skill 工具。<code>WithCodeExecutor</code> 让 workspace 执行工具可用。关闭 fenced-code 自动执行，是为了避免把“工具执行”和“回复里的 Markdown 代码块自动执行”混在一起。</p>
+  </section>
+
+  <section>
+    <h2>三层信息模型</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>层</th>
+        <th>发生了什么</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>Overview</td>
+        <td>框架把 skill 的 <code>name</code> 和 <code>description</code> 注入上下文，让模型知道可选 skill。</td>
+      </tr>
+      <tr>
+        <td>Body / docs</td>
+        <td>模型需要时调用 <code>skill_load</code>，框架把 <code>SKILL.md</code> 正文和选定 docs 材料化到请求中。</td>
+      </tr>
+      <tr>
+        <td>Scripts</td>
+        <td>脚本不会被内联到 prompt；需要执行时通过 workspace 执行工具在隔离 workspace 中运行。</td>
+      </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>四个常见误解</h2>
+    <div class="grid">
+      <div class="panel">
+        <h3><code>skill_load</code> 不是运行脚本</h3>
+        <p>它加载知识材料。脚本执行属于 workspace 执行。</p>
+      </div>
+      <div class="panel">
+        <h3><code>WithSkills</code> 不等于生产沙箱</h3>
+        <p>文档说明没有显式 executor 时可能有 local fallback；生产语境应显式理解 executor 选择。</p>
+      </div>
+      <div class="panel">
+        <h3>docs 选择要克制</h3>
+        <p>Skill docs 是按需选择的，避免把整个知识库一次性塞进上下文。</p>
+      </div>
+      <div class="panel">
+        <h3>SkillLoadMode 是生命周期概念</h3>
+        <p>它影响 loaded skill 状态在 turn 或 session 中如何保留，不是执行模式。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>和 issue #2004 的关系</h2>
+    <p>issue 里说 code-review Skill 要包含 <code>SKILL.md</code>、规则文档、脚本目录和使用说明。背景含义是：规则和说明作为可加载知识，脚本作为可执行资产；两者由不同机制进入 Agent 工作流。</p>
+    <p>你需要掌握的是框架边界：知识加载归 Skill 工具，程序执行归 workspace / code executor，安全治理归 PermissionPolicy 或安全 wrapper。</p>
+  </section>
+
+  <section>
+    <h2>练习</h2>
+    <details>
+      <summary>1. <code>skill_load</code> 成功后，脚本会自动运行吗？</summary>
+      <p>不会。<code>skill_load</code> 只加载 <code>SKILL.md</code> 正文和 docs；脚本执行要通过 workspace 执行工具。</p>
+    </details>
+    <details>
+      <summary>2. <code>WithCodeExecutor</code> 的直接意义是什么？</summary>
+      <p>让 agent 拥有 code execution / workspace execution 能力。它不等于自动运行 assistant 回复中的所有 Markdown 代码块。</p>
+    </details>
+    <details>
+      <summary>3. 为什么 docs/scripts 要分开理解？</summary>
+      <p>docs 是上下文知识，会进入模型请求；scripts 是可执行资产，应在 workspace 中运行，并受执行治理约束。</p>
+    </details>
+  </section>
+
+  <section>
+    <h2>来源</h2>
+    <ul>
+      <li><a href="../docs/mkdocs/en/skill.md">Skill 文档</a></li>
+      <li><a href="../tool/skill/load.go">tool/skill/load.go</a></li>
+      <li><a href="../tool/workspaceexec/workspace_exec.go">tool/workspaceexec/workspace_exec.go</a></li>
+    </ul>
+    <p>速查：<a href="../reference/0003-skills-codeexecutor-cheatsheet.html">Skills 与 CodeExecutor 速查</a>。</p>
+  </section>
+</main>
+</body>
+</html>

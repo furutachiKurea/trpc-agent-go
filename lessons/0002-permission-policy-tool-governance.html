@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第二课：PermissionPolicy 与工具治理</title>
+  <link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="meta">Lesson 0002 · 预计 15 分钟</p>
+    <h1>PermissionPolicy 与工具治理</h1>
+    <p class="lede">这一课只学通用框架 API：如何区分工具可见、工具自动执行、工具执行前审批。issue #2004 里的高风险命令治理，需要先掌握这三层边界。</p>
+  </header>
+
+  <section>
+    <h2>先分清三件事</h2>
+    <table>
+      <thead>
+      <tr>
+        <th>问题</th>
+        <th>框架机制</th>
+        <th>一句话</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr>
+        <td>模型能不能看到这个工具？</td>
+        <td><code>ToolFilter</code></td>
+        <td>控制工具表面。</td>
+      </tr>
+      <tr>
+        <td>模型调用后框架是否自动执行？</td>
+        <td><code>ToolExecutionFilter</code></td>
+        <td>控制执行权归框架还是宿主。</td>
+      </tr>
+      <tr>
+        <td>这次具体调用是否允许执行？</td>
+        <td><code>PermissionPolicy</code></td>
+        <td>控制执行前审批。</td>
+      </tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <p>这三层不要混用。隐藏工具不是审批；交给宿主执行也不是拒绝；审批通过才是 <code>allow</code>。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>PermissionPolicy 的 API 形状</h2>
+    <p>源码中 <code>PermissionPolicy</code> 只有一个核心方法：接收一次待执行 tool call 的 <code>PermissionRequest</code>，返回 <code>PermissionDecision</code>。</p>
+    <pre><code class="language-go">type PermissionPolicy interface {
+    CheckToolPermission(
+        ctx context.Context,
+        req *tool.PermissionRequest,
+    ) (tool.PermissionDecision, error)
+}</code></pre>
+    <p>常用写法是用 <code>tool.PermissionPolicyFunc</code> 或 <code>agent.WithToolPermissionPolicyFunc</code> 传入函数。</p>
+  </section>
+
+  <section>
+    <h2>最小通用例子</h2>
+    <p>下面的例子只演示框架 API，不绑定 issue #2004。它按 tool metadata 判断 destructive 工具是否需要审批。</p>
+    <pre><code class="language-go">func policy(
+    _ context.Context,
+    req *tool.PermissionRequest,
+) (tool.PermissionDecision, error) {
+    if req.Metadata.Destructive {
+        return tool.AskPermission("approval required"), nil
+    }
+    return tool.AllowPermission(), nil
+}
+
+events, err := runner.Run(
+    ctx,
+    userID,
+    sessionID,
+    model.NewUserMessage("run the task"),
+    agent.WithToolPermissionPolicyFunc(policy),
+)</code></pre>
+    <p><code>ask</code> 和 <code>deny</code> 都不会执行工具。它们会把结构化结果返回给模型，让 assistant 能解释发生了什么。</p>
+  </section>
+
+  <section>
+    <h2>如何读 PermissionRequest</h2>
+    <div class="grid">
+      <div class="panel">
+        <h3><code>ToolName</code></h3>
+        <p>适合按工具名分支。例如只对执行类工具做额外检查。</p>
+      </div>
+      <div class="panel">
+        <h3><code>Arguments</code></h3>
+        <p>JSON 参数，已经过框架修复和 before-tool callbacks。适合解析命令、路径、环境变量。</p>
+      </div>
+      <div class="panel">
+        <h3><code>Metadata</code></h3>
+        <p>工具声明的安全属性。示例里用 <code>Destructive</code> 判断是否需要审批。</p>
+      </div>
+      <div class="panel">
+        <h3><code>ToolCallID</code></h3>
+        <p>和模型发出的具体 tool call 对齐。适合后续审计概念理解。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>和 issue #2004 的关系</h2>
+    <p>issue 提到“高风险命令必须先经过 PermissionPolicy 或安全 wrapper 决策”。这句话的背景是：执行类工具一旦放进 Agent 工具表面，模型可能提出具体调用；框架在真正执行前提供了 permission checkpoint。</p>
+    <p>这里你只需要掌握通用判断：<code>allow</code> 执行，<code>ask</code> 等待宿主审批且当前不执行，<code>deny</code> 拒绝且不执行。</p>
+  </section>
+
+  <section>
+    <h2>练习</h2>
+    <p>先在脑子里回答，再展开校验。</p>
+
+    <details>
+      <summary>1. 想让模型完全看不到某个工具，用哪一层？</summary>
+      <p><code>ToolFilter</code>。它控制工具表面，也就是模型可见的工具集合。</p>
+    </details>
+
+    <details>
+      <summary>2. 想让模型能调用，但不由框架自动执行，用哪一层？</summary>
+      <p><code>ToolExecutionFilter</code>。它让 run 在 assistant tool_call 后停下，由宿主执行并补回 tool message。</p>
+    </details>
+
+    <details>
+      <summary>3. 想按这次调用的参数决定 allow / ask / deny，用哪一层？</summary>
+      <p><code>PermissionPolicy</code>。它在执行前拿到具体 tool call 的参数和 metadata。</p>
+    </details>
+
+    <details>
+      <summary>4. <code>ask</code> 是不是会先执行工具再让用户确认？</summary>
+      <p>不是。<code>ask</code> 表示当前不执行，并返回 approval required。真实审批 UI 应在 policy 内处理，批准后返回 <code>allow</code>。</p>
+    </details>
+  </section>
+
+  <section>
+    <h2>来源</h2>
+    <ul>
+      <li><a href="../tool/permission.go">tool/permission.go</a>：<code>PermissionAction</code>、<code>PermissionDecision</code>、<code>PermissionPolicy</code>。</li>
+      <li><a href="../agent/invocation.go">agent/invocation.go</a>：<code>WithToolFilter</code>、<code>WithToolExecutionFilter</code>、<code>WithToolPermissionPolicy</code> 的边界说明。</li>
+      <li><a href="../examples/toolpolicy/README.md">examples/toolpolicy/README.md</a>：read-only / destructive 工具的通用示例。</li>
+    </ul>
+    <p>速查：<a href="../reference/0002-tool-governance-cheatsheet.html">Tool Governance 速查</a>。</p>
+    <p class="meta">下一课适合进入 Skill：<code>SKILL.md</code>、<code>WithSkills</code>、<code>skill_load</code>、<code>workspace_exec</code> 的边界。</p>
+  </section>
+</main>
+</body>
+</html>
